@@ -12,6 +12,7 @@ Features:
 """
 
 import argparse
+import html as html_mod
 import json
 import os
 import pty
@@ -94,46 +95,203 @@ class ConsoleRenderer:
 
 
 class HTMLRenderer:
-    """Renders the game session directly to an HTML file."""
+    """Renders the game session to an HTML file using a card-based layout."""
+
+    _HTML_HEADER = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Adventure Player Transcript</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --turn-bg: #0b1120;
+            --border-color: #334155;
+            --text-main: #cbd5e1;
+            --text-reasoning: #a78bfa;
+            --text-command: #4ade80;
+            --text-response: #f8fafc;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            margin: 0;
+            padding: 40px 20px;
+            line-height: 1.6;
+        }
+        .container { max-width: 950px; margin: 0 auto; }
+        .turn-card {
+            display: flex;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 24px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+        }
+        .turn-sidebar {
+            flex: 0 0 100px;
+            background: var(--turn-bg);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            flex-direction: column;
+            padding: 24px 10px;
+        }
+        .turn-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+        }
+        .turn-number {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            line-height: 1;
+            margin-top: 8px;
+        }
+        .turn-content { flex: 1; padding: 24px; min-width: 0; }
+        .reasoning {
+            color: var(--text-reasoning);
+            font-style: italic;
+            margin-bottom: 20px;
+            font-size: 1.05rem;
+        }
+        .command {
+            font-family: var(--font-mono);
+            color: var(--text-command);
+            margin-bottom: 20px;
+            font-size: 1.1rem;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 12px 16px;
+            border-radius: 8px;
+            border-left: 4px solid var(--text-command);
+        }
+        .command strong { font-weight: 700; }
+        .response {
+            font-family: var(--font-mono);
+            color: var(--text-response);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            background: #0f172a;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            font-size: 0.95rem;
+        }
+        .response::-webkit-scrollbar { height: 8px; }
+        .response::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+"""
+
     def __init__(self, filepath: str = "session.html"):
         self.filepath = filepath
+        self._current_turn = -1  # no turn yet
         with open(self.filepath, "w", encoding="utf-8") as f:
-            f.write(
-                "<html><head><style>"
-                "body { font-family: sans-serif; max-width: 800px; margin: 20px auto; background: #fafafa; color: #333; }"
-                ".game { background: #eee; padding: 15px; border-radius: 5px; font-family: monospace; white-space: pre-wrap; margin-bottom: 20px; }"
-                ".reasoning { color: #666; font-style: italic; border-left: 3px solid #ccc; padding-left: 10px; }"
-                ".command { color: #0055cc; font-weight: bold; font-family: monospace; font-size: 1.1em; margin-bottom: 20px; }"
-                ".system { color: #d97706; font-size: 0.9em; }"
-                ".error { color: #dc2626; font-weight: bold; }"
-                "</style></head><body>\n"
-            )
+            f.write(self._HTML_HEADER)
 
     def session_start(self):
-        self._write("<h1>AI Adventure Session</h1>\n")
+        pass  # header already written in __init__
 
     def game_output(self, text: str):
-        self._write(f'<div class="game">{text}</div>\n')
+        escaped = html_mod.escape(text)
+        if self._current_turn <= 0:
+            # Turn 0: opening text, wrap in its own card
+            self._write(
+                '        <div class="turn-card">\n'
+                '            <div class="turn-sidebar">\n'
+                '                <div class="turn-label">Turn</div>\n'
+                '                <div class="turn-number">0</div>\n'
+                '            </div>\n'
+                '            <div class="turn-content">\n'
+                f'                <div class="response">{escaped}</div>\n'
+                '            </div>\n'
+                '        </div>\n\n'
+            )
+        else:
+            # Response for an active turn card — write response and close card
+            self._write(
+                f'                <div class="response">{escaped}</div>\n'
+                '            </div>\n'
+                '        </div>\n\n'
+            )
 
     def turn_start(self, turn: int):
-        self._write(f"<h2>Turn {turn}</h2>\n")
+        self._current_turn = turn
+        self._write(
+            '        <div class="turn-card">\n'
+            '            <div class="turn-sidebar">\n'
+            '                <div class="turn-label">Turn</div>\n'
+            f'                <div class="turn-number">{turn}</div>\n'
+            '            </div>\n'
+            '            <div class="turn-content">\n'
+        )
 
     def ai_action(self, reasoning: str, command: str):
-        self._write(f'<div class="reasoning">{reasoning}</div>\n')
-        self._write(f'<div class="command">&gt; {command}</div>\n')
+        r_esc = html_mod.escape(reasoning)
+        c_esc = html_mod.escape(command)
+        self._write(
+            f'                <div class="reasoning">{r_esc}</div>\n'
+            f'                <div class="command">&gt; <strong>{c_esc}</strong></div>\n'
+        )
 
     def system_message(self, message: str):
-        self._write(f'<div class="system">[System] {message}</div>\n')
+        pass  # system messages are console-only
 
     def error(self, message: str):
-        self._write(f'<div class="error">[Error] {message}</div>\n')
+        pass  # errors are console-only
 
     def session_end(self):
-        self._write("<h3>Session Terminated</h3>\n</body></html>\n")
+        self._write("    </div>\n</body>\n</html>\n")
 
-    def _write(self, html: str):
+    def _write(self, content: str):
         with open(self.filepath, "a", encoding="utf-8") as f:
-            f.write(html)
+            f.write(content)
+
+
+class MultiRenderer:
+    """Dispatches to multiple renderers so stdout and HTML run simultaneously."""
+    def __init__(self, renderers: List):
+        self.renderers = renderers
+
+    def session_start(self):
+        for r in self.renderers:
+            r.session_start()
+
+    def game_output(self, text: str):
+        for r in self.renderers:
+            r.game_output(text)
+
+    def turn_start(self, turn: int):
+        for r in self.renderers:
+            r.turn_start(turn)
+
+    def ai_action(self, reasoning: str, command: str):
+        for r in self.renderers:
+            r.ai_action(reasoning, command)
+
+    def system_message(self, message: str):
+        for r in self.renderers:
+            r.system_message(message)
+
+    def error(self, message: str):
+        for r in self.renderers:
+            r.error(message)
+
+    def session_end(self):
+        for r in self.renderers:
+            r.session_end()
 
 
 # ===========================================================================
@@ -170,29 +328,36 @@ class OpenAILLMClient:
 
 def extract_json_robust(text: str) -> Optional[dict]:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    
-    start_idx = text.find('{')
-    if start_idx == -1:
-        return None
-        
-    stack =[]
-    for i in range(start_idx, len(text)):
-        char = text[i]
-        if char == '{':
-            stack.append('{')
-        elif char == '}':
-            if stack:
-                stack.pop()
-            if not stack:
-                json_str = text[start_idx:i+1]
-                try:
-                    obj = json.loads(json_str)
-                    if isinstance(obj, dict) and "command" in obj:
-                        return obj
-                except json.JSONDecodeError:
-                    pass 
-                break
-                
+
+    idx = 0
+    while idx < len(text):
+        start_idx = text.find('{', idx)
+        if start_idx == -1:
+            return None
+
+        stack = []
+        found_end = False
+        for i in range(start_idx, len(text)):
+            char = text[i]
+            if char == '{':
+                stack.append('{')
+            elif char == '}':
+                if stack:
+                    stack.pop()
+                if not stack:
+                    json_str = text[start_idx:i+1]
+                    try:
+                        obj = json.loads(json_str)
+                        if isinstance(obj, dict) and "command" in obj:
+                            return obj
+                    except json.JSONDecodeError:
+                        pass
+                    idx = i + 1
+                    found_end = True
+                    break
+        if not found_end:
+            return None
+
     return None
 
 def clean_game_output(text: str) -> str:
@@ -485,20 +650,23 @@ def main():
     parser = argparse.ArgumentParser(description="AI-powered text adventure player")
     parser.add_argument("story", help="Path to Z-machine story file")
     parser.add_argument("-n", "--max-turns", type=int, default=9999)
-    parser.add_argument("--html", action="store_true", help="Output to session.html instead of stdout")
+    parser.add_argument("--html-file", default="session.html", help="Path for HTML transcript (default: session.html)")
+    parser.add_argument("--no-html", action="store_true", help="Disable HTML output")
     args = parser.parse_args()
 
     config = AgentConfig()
     tokenizer = TiktokenTokenizer()
     llm = OpenAILLMClient(config)
-    
-    # Inject chosen rendering strategy based on CLI flags
-    renderer = HTMLRenderer() if args.html else ConsoleRenderer()
-    
+
+    renderers = [ConsoleRenderer()]
+    if not args.no_html:
+        renderers.append(HTMLRenderer(filepath=args.html_file))
+    renderer = MultiRenderer(renderers)
+
     context = ContextManager(config, llm, tokenizer, renderer)
     agent = Agent(config, llm, context, renderer)
     engine = FrotzEngine(args.story)
-    
+
     session = GameSession(engine, agent, renderer)
     session.run(args.max_turns)
 
