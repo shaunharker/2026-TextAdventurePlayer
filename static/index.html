@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Adventure Player</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --turn-bg: #0b1120;
+            --border-color: #334155;
+            --text-main: #cbd5e1;
+            --text-muted: #64748b;
+            --text-reasoning: #a78bfa;
+            --text-command: #4ade80;
+            --text-response: #f8fafc;
+            --text-hint: #fbbf24;
+            --accent: #6366f1;
+            --danger: #ef4444;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            min-height: 100vh;
+        }
+
+        /* ---- Config Panel ---- */
+        #config-panel {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .config-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 48px 40px;
+            max-width: 520px;
+            width: 100%;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+        }
+        .config-card h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--text-response);
+            margin-bottom: 32px;
+            text-align: center;
+        }
+        .form-group { margin-bottom: 20px; }
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
+        }
+        .form-group select,
+        .form-group input {
+            width: 100%;
+            padding: 10px 14px;
+            background: var(--turn-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-main);
+            font-family: var(--font-mono);
+            font-size: 0.95rem;
+            outline: none;
+        }
+        .form-group select:focus,
+        .form-group input:focus {
+            border-color: var(--accent);
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--card-bg);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .btn:hover { background: var(--border-color); }
+        .btn-primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+            font-weight: 600;
+        }
+        .btn-primary:hover { background: #4f46e5; }
+        .btn-danger { border-color: var(--danger); color: var(--danger); }
+        .btn-danger:hover { background: rgba(239,68,68,0.15); }
+        .btn-start {
+            width: 100%;
+            margin-top: 12px;
+            padding: 14px;
+            font-size: 1.05rem;
+        }
+
+        /* ---- Game Panel ---- */
+        #game-panel {
+            display: none;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #top-bar {
+            flex: 0 0 auto;
+            padding: 14px 24px;
+            background: var(--card-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+        #top-bar .game-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: var(--text-response);
+        }
+        #top-bar .controls { display: flex; gap: 8px; }
+
+        #stats-bar {
+            flex: 0 0 auto;
+            padding: 10px 24px;
+            background: var(--turn-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            gap: 28px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+        }
+        #stats-bar strong { color: var(--text-main); }
+        .stat-sep {
+            width: 1px;
+            background: var(--border-color);
+            align-self: stretch;
+        }
+
+        #turns {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        /* ---- Turn Cards ---- */
+        .turn-card {
+            display: flex;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 24px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2);
+        }
+        .turn-sidebar {
+            flex: 0 0 90px;
+            background: var(--turn-bg);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            flex-direction: column;
+            padding: 20px 8px;
+            gap: 6px;
+        }
+        .turn-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+        .turn-number {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            line-height: 1;
+        }
+        .rollback-btn {
+            display: none;
+            margin-top: 8px;
+            padding: 4px 10px;
+            font-size: 0.75rem;
+            border-radius: 6px;
+            border: 1px solid var(--text-hint);
+            background: transparent;
+            color: var(--text-hint);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .rollback-btn:hover { background: rgba(251,191,36,0.15); }
+        body.paused .rollback-btn { display: block; }
+
+        .turn-content {
+            flex: 1;
+            padding: 20px 24px;
+            min-width: 0;
+        }
+        .reasoning {
+            color: var(--text-reasoning);
+            font-style: italic;
+            margin-bottom: 16px;
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+        .command {
+            font-family: var(--font-mono);
+            color: var(--text-command);
+            margin-bottom: 16px;
+            font-size: 1.05rem;
+            background: rgba(15,23,42,0.6);
+            padding: 10px 14px;
+            border-radius: 8px;
+            border-left: 4px solid var(--text-command);
+        }
+        .command strong { font-weight: 700; }
+        .response {
+            font-family: var(--font-mono);
+            color: var(--text-response);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            background: var(--bg-color);
+            padding: 16px 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        /* ---- Notices ---- */
+        .hint-notice {
+            padding: 10px 16px;
+            margin-bottom: 16px;
+            border-radius: 8px;
+            border-left: 4px solid var(--text-hint);
+            background: rgba(251,191,36,0.08);
+            color: var(--text-hint);
+            font-size: 0.9rem;
+        }
+        .system-notice {
+            padding: 8px 16px;
+            margin-bottom: 12px;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-style: italic;
+        }
+        .error-notice {
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            border-left: 4px solid var(--danger);
+            background: rgba(239,68,68,0.08);
+            color: var(--danger);
+            font-size: 0.9rem;
+        }
+
+        /* ---- Spinner (shown in turn card while LLM is thinking) ---- */
+        .spinner {
+            display: inline-block;
+            width: 20px; height: 20px;
+            border: 2px solid var(--border-color);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .thinking-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            padding: 8px 0;
+        }
+
+        /* ---- Hint Bar ---- */
+        #hint-bar {
+            flex: 0 0 auto;
+            padding: 14px 24px;
+            background: var(--card-bg);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        #hint-input {
+            flex: 1;
+            padding: 10px 14px;
+            background: var(--turn-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            font-size: 0.95rem;
+            outline: none;
+        }
+        #hint-input:focus { border-color: var(--accent); }
+        #hint-bar label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        /* ---- Scrollbar ---- */
+        #turns::-webkit-scrollbar { width: 8px; }
+        #turns::-webkit-scrollbar-track { background: transparent; }
+        #turns::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<!-- ============ Config Panel ============ -->
+<div id="config-panel">
+    <div class="config-card">
+        <h1>AI Adventure Player</h1>
+        <div class="form-group">
+            <label>Game File</label>
+            <select id="game-select"></select>
+        </div>
+        <div class="form-group">
+            <label>LLM API Endpoint</label>
+            <input id="llm-url" value="http://localhost:8080/v1/chat/completions">
+        </div>
+        <div class="form-group">
+            <label>Model Name</label>
+            <input id="model-name" value="gemma-4-31B-it-UD-Q4_K_XL.gguf">
+        </div>
+        <button class="btn btn-primary btn-start" onclick="startGame()">Start Game</button>
+    </div>
+</div>
+
+<!-- ============ Game Panel ============ -->
+<div id="game-panel">
+    <div id="top-bar">
+        <span class="game-title" id="game-name">...</span>
+        <div class="controls">
+            <button class="btn" id="pause-btn" onclick="togglePause()">Pause</button>
+            <button class="btn btn-danger" onclick="stopGame()">Stop</button>
+        </div>
+    </div>
+    <div id="stats-bar">
+        <span>LLM Time: <strong id="stat-time">-</strong></span>
+        <div class="stat-sep"></div>
+        <span>Uncached In: <strong id="stat-uncached">-</strong> &nbsp;(total: <strong id="stat-total-uncached">0</strong>)</span>
+        <div class="stat-sep"></div>
+        <span>Output: <strong id="stat-output">-</strong> &nbsp;(total: <strong id="stat-total-output">0</strong>)</span>
+        <div class="stat-sep"></div>
+        <span>Total LLM: <strong id="stat-total-time">0s</strong></span>
+    </div>
+    <div id="turns"></div>
+    <div id="hint-bar">
+        <input id="hint-input" placeholder="Type a hint for the AI..." onkeydown="if(event.key==='Enter')sendHint()">
+        <label><input type="checkbox" id="translate-check"> Translate</label>
+        <button class="btn" onclick="sendHint()">Send Hint</button>
+    </div>
+</div>
+
+<script>
+// ===========================================================================
+// State
+// ===========================================================================
+let ws = null;
+let isPaused = false;
+let currentTurn = 0;
+
+// ===========================================================================
+// Init: populate game list
+// ===========================================================================
+fetch('/games').then(r => r.json()).then(games => {
+    const sel = document.getElementById('game-select');
+    games.forEach(g => {
+        const opt = document.createElement('option');
+        opt.value = g; opt.textContent = g;
+        sel.appendChild(opt);
+    });
+});
+
+// ===========================================================================
+// Start / Stop
+// ===========================================================================
+function startGame() {
+    const game = document.getElementById('game-select').value;
+    const llmUrl = document.getElementById('llm-url').value;
+    const model = document.getElementById('model-name').value;
+
+    fetch('/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({game, llm_url: llmUrl, model}),
+    })
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById('config-panel').style.display = 'none';
+        document.getElementById('game-panel').style.display = 'flex';
+        document.getElementById('game-name').textContent = data.game;
+        document.getElementById('turns').innerHTML = '';
+        connectWS();
+    });
+}
+
+function stopGame() {
+    if (!confirm('Stop the game?')) return;
+    if (ws) ws.send(JSON.stringify({type: 'stop'}));
+    document.getElementById('game-panel').style.display = 'none';
+    document.getElementById('config-panel').style.display = 'flex';
+    isPaused = false;
+    document.body.classList.remove('paused');
+}
+
+// ===========================================================================
+// WebSocket
+// ===========================================================================
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    ws.onmessage = e => handleEvent(JSON.parse(e.data));
+    ws.onclose = () => console.log('WS closed');
+}
+
+function handleEvent(ev) {
+    switch (ev.type) {
+        case 'full_state':    handleFullState(ev); break;
+        case 'game_output':   handleGameOutput(ev); break;
+        case 'turn_start':    handleTurnStart(ev); break;
+        case 'ai_action':     handleAiAction(ev); break;
+        case 'stats':         handleStats(ev); break;
+        case 'rollback':      handleRollback(ev); break;
+        case 'hint_injected': handleHintInjected(ev); break;
+        case 'paused':        setPaused(true); break;
+        case 'resumed':       setPaused(false); break;
+        case 'system_message': addNotice('system-notice', ev.message); break;
+        case 'error':         addNotice('error-notice', ev.message); break;
+        case 'session_end':   addNotice('system-notice', 'Session ended.'); break;
+    }
+}
+
+// ===========================================================================
+// Event handlers
+// ===========================================================================
+function handleFullState(ev) {
+    const cont = document.getElementById('turns');
+    cont.innerHTML = '';
+
+    if (ev.opening_text) {
+        cont.appendChild(buildTurnCard(0, null, null, ev.opening_text));
+    }
+    (ev.turns || []).forEach(t => {
+        cont.appendChild(buildTurnCard(t.turn, t.reasoning, t.command, t.game_output));
+        currentTurn = t.turn;
+    });
+    if (ev.paused) setPaused(true);
+    if (ev.stats && Object.keys(ev.stats).length) handleStats(ev.stats);
+    autoScroll();
+}
+
+function handleGameOutput(ev) {
+    const turn = ev.turn ?? 0;
+    if (turn === 0) {
+        // Opening text — create turn-0 card
+        const cont = document.getElementById('turns');
+        cont.appendChild(buildTurnCard(0, null, null, ev.text));
+    } else {
+        // Append response to existing card and remove spinner
+        const card = document.getElementById('turn-' + turn);
+        if (card) {
+            const tc = card.querySelector('.turn-content');
+            removeSpinner(tc);
+            const div = document.createElement('div');
+            div.className = 'response';
+            div.textContent = ev.text;
+            tc.appendChild(div);
+        }
+    }
+    autoScroll();
+}
+
+function handleTurnStart(ev) {
+    currentTurn = ev.turn;
+    const card = makeTurnCardSkeleton(ev.turn);
+    // Add thinking spinner
+    const tc = card.querySelector('.turn-content');
+    const sp = document.createElement('div');
+    sp.className = 'thinking-label';
+    sp.innerHTML = '<div class="spinner"></div> Thinking...';
+    tc.appendChild(sp);
+    document.getElementById('turns').appendChild(card);
+    autoScroll();
+}
+
+function handleAiAction(ev) {
+    const turn = ev.turn ?? currentTurn;
+    const card = document.getElementById('turn-' + turn);
+    if (!card) return;
+    const tc = card.querySelector('.turn-content');
+    removeSpinner(tc);
+
+    const rDiv = document.createElement('div');
+    rDiv.className = 'reasoning';
+    rDiv.textContent = ev.reasoning;
+    tc.appendChild(rDiv);
+
+    const cDiv = document.createElement('div');
+    cDiv.className = 'command';
+    cDiv.innerHTML = '&gt; <strong>' + escapeHtml(ev.command) + '</strong>';
+    tc.appendChild(cDiv);
+    autoScroll();
+}
+
+function handleStats(ev) {
+    const fmt = n => typeof n === 'number' ? n.toLocaleString() : '-';
+    document.getElementById('stat-time').textContent =
+        ev.llm_time_ms != null ? (ev.llm_time_ms / 1000).toFixed(1) + 's' : '-';
+    document.getElementById('stat-uncached').textContent = fmt(ev.uncached_tokens);
+    document.getElementById('stat-output').textContent = fmt(ev.output_tokens);
+    document.getElementById('stat-total-uncached').textContent = fmt(ev.total_uncached);
+    document.getElementById('stat-total-output').textContent = fmt(ev.total_output);
+    document.getElementById('stat-total-time').textContent =
+        ev.total_llm_time != null ? (ev.total_llm_time / 1000).toFixed(0) + 's' : '0s';
+}
+
+function handleRollback(ev) {
+    const cont = document.getElementById('turns');
+    cont.querySelectorAll('.turn-card').forEach(card => {
+        if (parseInt(card.dataset.turn) > ev.to_turn) card.remove();
+    });
+    // Also remove any trailing notices
+    currentTurn = ev.to_turn;
+    addNotice('system-notice', 'Rolled back to turn ' + ev.to_turn);
+}
+
+function handleHintInjected(ev) {
+    const text = ev.original === ev.translated
+        ? ev.translated
+        : ev.translated + '  (original: ' + ev.original + ')';
+    addNotice('hint-notice', 'Hint injected: ' + text);
+}
+
+// ===========================================================================
+// DOM helpers
+// ===========================================================================
+function buildTurnCard(turn, reasoning, command, response) {
+    const card = makeTurnCardSkeleton(turn);
+    const tc = card.querySelector('.turn-content');
+    if (reasoning) {
+        const r = document.createElement('div');
+        r.className = 'reasoning'; r.textContent = reasoning;
+        tc.appendChild(r);
+    }
+    if (command) {
+        const c = document.createElement('div');
+        c.className = 'command';
+        c.innerHTML = '&gt; <strong>' + escapeHtml(command) + '</strong>';
+        tc.appendChild(c);
+    }
+    if (response) {
+        const d = document.createElement('div');
+        d.className = 'response'; d.textContent = response;
+        tc.appendChild(d);
+    }
+    return card;
+}
+
+function makeTurnCardSkeleton(turn) {
+    const card = document.createElement('div');
+    card.className = 'turn-card';
+    card.id = 'turn-' + turn;
+    card.dataset.turn = turn;
+
+    const sidebar = document.createElement('div');
+    sidebar.className = 'turn-sidebar';
+    sidebar.innerHTML =
+        '<div class="turn-label">Turn</div>' +
+        '<div class="turn-number">' + turn + '</div>';
+    if (turn > 0) {
+        const rb = document.createElement('button');
+        rb.className = 'rollback-btn';
+        rb.textContent = '\u21a9 Here';
+        rb.title = 'Rollback to turn ' + turn;
+        rb.onclick = () => rollbackTo(turn);
+        sidebar.appendChild(rb);
+    }
+    card.appendChild(sidebar);
+
+    const content = document.createElement('div');
+    content.className = 'turn-content';
+    card.appendChild(content);
+    return card;
+}
+
+function removeSpinner(tc) {
+    const sp = tc.querySelector('.thinking-label');
+    if (sp) sp.remove();
+}
+
+function addNotice(cls, text) {
+    const div = document.createElement('div');
+    div.className = cls;
+    div.textContent = text;
+    document.getElementById('turns').appendChild(div);
+    autoScroll();
+}
+
+function escapeHtml(s) {
+    const el = document.createElement('span');
+    el.textContent = s;
+    return el.innerHTML;
+}
+
+function autoScroll() {
+    const t = document.getElementById('turns');
+    t.scrollTop = t.scrollHeight;
+}
+
+// ===========================================================================
+// Controls
+// ===========================================================================
+function togglePause() {
+    if (ws) ws.send(JSON.stringify({type: isPaused ? 'resume' : 'pause'}));
+}
+
+function setPaused(paused) {
+    isPaused = paused;
+    document.body.classList.toggle('paused', paused);
+    const btn = document.getElementById('pause-btn');
+    btn.textContent = paused ? 'Resume' : 'Pause';
+}
+
+function rollbackTo(turn) {
+    if (!confirm('Roll back to turn ' + turn + '? All later turns will be removed.')) return;
+    if (ws) ws.send(JSON.stringify({type: 'rollback', to_turn: turn}));
+}
+
+function sendHint() {
+    const input = document.getElementById('hint-input');
+    const text = input.value.trim();
+    if (!text || !ws) return;
+    const translate = document.getElementById('translate-check').checked;
+    ws.send(JSON.stringify({type: 'hint', text, translate}));
+    input.value = '';
+}
+</script>
+</body>
+</html>
