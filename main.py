@@ -36,10 +36,8 @@ class AgentConfig:
     llm_url: str = "http://localhost:8080/v1/chat/completions"
     model: str = "gemma-4-31B-it-UD-Q4_K_XL.gguf"
     context_window: int = 49152
-    compact_at_fraction: float = 0.75
-    recent_context_tokens: int = 16384
+    safety_buffer: int = 1024
     max_response_tokens: int = 4096
-    max_summary_tokens: int = 8192
     llm_retries: int = 10
     temperature: float = 0.7
     raw_temp: float = 0.3
@@ -507,24 +505,6 @@ Hints and Tips:
 - Don't try to brute force puzzles (e.g. don't try every combination on a lock, actually play the game)
 """
 
-    SUMMARY_PROMPT = """\
-You are summarizing a text adventure game session for an AI player that needs \
-to continue playing. The player's conversation history is getting too long and \
-must be compressed.
-
-Produce a concise but thorough summary covering:
-1. STORY SO FAR: Key plot events and narrative progress
-2. CURRENT STATE: Where the player is right now, what just happened
-3. INVENTORY: All items the player is carrying
-4. MAP KNOWLEDGE: Locations discovered and how they connect
-5. PUZZLES & GOALS: What the player is trying to do, what's been solved, what's blocked
-6. HINTS: Anything the player has learned that might be useful later (clues, \
-   locked doors, NPCs, items seen but not taken, failed attempts)
-7. WALKTHROUGH: (Important!) Summarize the steps required to resolve the game from a restarted state.
-
-Be factual and specific. Do not invent details not present in the history.\
-"""
-
     def __init__(self, config: AgentConfig, llm: LLMProvider, tokenizer: Tokenizer, renderer: OutputRenderer):
         self.config = config
         self.llm = llm
@@ -542,57 +522,11 @@ Be factual and specific. Do not invent details not present in the history.\
     def get_total_tokens(self) -> int:
         return sum(self.tokenizer.count_tokens(m["content"]) for m in self.messages)
 
-    def compact_if_needed(self) -> bool:
-        current_tokens = self.get_total_tokens()
-        threshold = int(self.config.context_window * self.config.compact_at_fraction)
-        
-        if current_tokens < threshold:
-            return False
-
-        self.renderer.system_message(f"Tokens at {current_tokens} / {self.config.context_window}. Compacting history...")
-        self._perform_compaction()
-        return True
-
-    def _perform_compaction(self):
-        transcript_parts = []
-        for msg in self.messages[1:]:
-            prefix = "GAME: " if msg["role"] == "user" else "PLAYER: "
-            transcript_parts.append(f"{prefix}{msg['content']}")
-        
-        transcript = "\n\n".join(transcript_parts)
-        summary_messages =[
-            {"role": "system", "content": self.SUMMARY_PROMPT},
-            {"role": "user", "content": f"Transcript:\n\n{transcript}"}
-        ]
-
-        try:
-            summary = self.llm.chat_completion(
-                summary_messages, 
-                max_tokens=self.config.max_summary_tokens, 
-                temperature=self.config.raw_temp
-            )
-        except Exception as e:
-            self.renderer.error(f"Summary generation failed: {e}. Falling back to truncation.")
-            self.messages =[self.messages[0]] + self.messages[-10:]
-            return
-
-        enhanced_system = (
-            f"{self.SYSTEM_PROMPT}\n\n"
-            f"--- EARLIER GAMEPLAY SUMMARY ---\n{summary}\n--- END SUMMARY ---\n"
-        )
-
-        recent =[]
-        tokens_used = 0
-        budget = self.config.recent_context_tokens
-
-        for msg in reversed(self.messages[1:]):
-            msg_tokens = self.tokenizer.count_tokens(msg["content"])
-            if tokens_used + msg_tokens > budget and recent:
-                break
-            recent.insert(0, msg)
-            tokens_used += msg_tokens
-
-        self.messages =[{"role": "system", "content": enhanced_system}] + recent
+    def tokens_remaining(self) -> int:
+        """How many tokens are available for the next response."""
+        used = self.get_total_tokens()
+        limit = self.config.context_window - self.config.safety_buffer
+        return max(0, limit - used)
 
 
 # ===========================================================================

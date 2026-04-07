@@ -203,6 +203,7 @@
         <div class="form-group"><label>LLM API Endpoint</label><input id="llm-url" value="http://localhost:8080/v1/chat/completions"></div>
         <div class="form-group"><label>Model Name</label><input id="model-name" value="gemma-4-31B-it-UD-Q4_K_XL.gguf"></div>
         <button class="btn btn-primary btn-start" onclick="startGame()">Start Game</button>
+        <button class="btn btn-start" id="restart-gemma-btn" onclick="restartGemma()" style="margin-top:8px; font-size:0.85rem; color:var(--text-muted);">Restart Gemma Server</button>
     </div>
 </div>
 
@@ -370,7 +371,7 @@ function handleFullState(ev) {
         currentTurn = t.turn;
     });
     if (ev.paused) setPaused(true);
-    autoScroll();
+    autoScrollIfNearBottom();
 }
 
 function handleGameOutput(ev) {
@@ -387,7 +388,7 @@ function handleGameOutput(ev) {
             tc.appendChild(div);
         }
     }
-    autoScroll();
+    autoScrollIfNearBottom();
 }
 
 function handleTurnStart(ev) {
@@ -400,7 +401,7 @@ function handleTurnStart(ev) {
     sp.innerHTML = '<div class="spinner"></div> Thinking...';
     tc.appendChild(sp);
     document.getElementById('turns').appendChild(card);
-    autoScroll();
+    autoScrollIfNearBottom();
 }
 
 function handleStreamingText(ev) {
@@ -414,7 +415,7 @@ function handleStreamingText(ev) {
     let streamDiv = tc.querySelector('.streaming-text');
     if (!streamDiv) { streamDiv = document.createElement('div'); streamDiv.className = 'streaming-text'; tc.appendChild(streamDiv); }
     streamDiv.textContent = display;
-    autoScroll();
+    autoScrollIfNearBottom();
 }
 
 function handleStreamProgress(ev) {
@@ -454,7 +455,7 @@ function handleAiAction(ev) {
     cDiv.className = 'command';
     cDiv.innerHTML = '&gt; <strong>' + escapeHtml(ev.command) + '</strong>';
     tc.appendChild(cDiv);
-    autoScroll();
+    autoScrollIfNearBottom();
 }
 
 function handleStats(ev) {
@@ -489,7 +490,7 @@ function handleTurnRetry(ev) {
     sp.innerHTML = '<div class="spinner"></div> ' + escapeHtml(ev.message || 'Retrying...');
     tc.appendChild(sp);
     setTurnStats(turn, '');
-    autoScroll();
+    autoScrollIfNearBottom();
 }
 
 function handleHintInjected(ev) { addNotice('hint-notice', ev.text); }
@@ -539,7 +540,23 @@ function addNotice(cls, text) {
 
 function escapeHtml(s) { const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
 
-function autoScroll() { const t = document.getElementById('turns'); t.scrollTop = t.scrollHeight; }
+let userScrolledUp = false;
+let userScrollTimer = null;
+document.addEventListener('DOMContentLoaded', () => {
+    const t = document.getElementById('turns');
+    if (!t) return;
+    t.addEventListener('wheel', e => {
+        if (e.deltaY < 0) { userScrolledUp = true; clearTimeout(userScrollTimer); userScrollTimer = setTimeout(() => { userScrolledUp = false; }, 200); }
+    });
+    t.addEventListener('touchmove', () => { userScrolledUp = true; clearTimeout(userScrollTimer); userScrollTimer = setTimeout(() => { userScrolledUp = false; }, 200); });
+});
+
+function autoScrollIfNearBottom() {
+    if (userScrolledUp) return;
+    const t = document.getElementById('turns');
+    const isNearBottom = (t.scrollHeight - t.scrollTop - t.clientHeight) < 150;
+    if (isNearBottom) t.scrollTop = t.scrollHeight;
+}
 
 // ---- Controls ----
 function togglePause() { if (ws) ws.send(JSON.stringify({type: isPaused ? 'resume' : 'pause'})); }
@@ -552,6 +569,19 @@ function setPaused(paused) {
 async function rollbackTo(turn) {
     if (!await showModal('Roll back to turn ' + turn + '? All later turns will be removed.', 'Roll Back')) return;
     if (ws) ws.send(JSON.stringify({type: 'rollback', to_turn: turn}));
+}
+
+async function restartGemma() {
+    const btn = document.getElementById('restart-gemma-btn');
+    btn.textContent = 'Restarting...'; btn.disabled = true;
+    try {
+        const resp = await fetch('/restart-gemma', {method: 'POST'});
+        const data = await resp.json();
+        btn.textContent = data.status === 'ok' ? 'Restarted' : 'Error: ' + (data.message || data.stderr || 'unknown');
+    } catch (e) {
+        btn.textContent = 'Error: ' + e.message;
+    }
+    setTimeout(() => { btn.textContent = 'Restart Gemma Server'; btn.disabled = false; }, 3000);
 }
 
 function sendHint() {

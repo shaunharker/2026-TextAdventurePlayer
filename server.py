@@ -324,12 +324,22 @@ class GameManager:
         loop = asyncio.get_event_loop()
         chunk_queue = asyncio.Queue()
 
+        # Cap max_tokens to what the context window can hold
+        remaining = self.context.tokens_remaining()
+        max_tokens = min(self.config.max_response_tokens, remaining)
+        if max_tokens <= 0:
+            raise RuntimeError(
+                f"Context full ({self.context.get_total_tokens()} tokens, "
+                f"limit {self.config.context_window - self.config.safety_buffer}). "
+                f"Consider rolling back."
+            )
+
         def on_chunk(text):
             loop.call_soon_threadsafe(chunk_queue.put_nowait, text)
 
         future = loop.run_in_executor(
             None, self.llm.chat_completion_streaming,
-            self.context.messages, self.config.max_response_tokens,
+            self.context.messages, max_tokens,
             self.config.temperature, cancel, on_chunk,
         )
 
@@ -439,10 +449,7 @@ class GameManager:
     # ------------------------------------------------------------------
     async def _do_turn(self, turn: int) -> bool:
         for attempt in range(1, self.config.llm_retries + 1):
-            await asyncio.to_thread(self.context.compact_if_needed)
-            await self.renderer.flush()
-
-            # Abort if paused during compaction (hint or pause arrived)
+            # Abort if paused (hint or pause arrived)
             if self.paused:
                 await self.renderer.send_event(
                     {"type": "turn_cancelled", "turn": turn}
@@ -555,6 +562,24 @@ async def games_handler(request):
     return web.json_response(games)
 
 
+def _query_context_window(base_url: str, model: str) -> Optional[int]:
+    """Query the LLM server's /models endpoint for context window size."""
+    try:
+        # Derive base from chat completions URL
+        models_url = base_url.rsplit("/", 2)[0] + "/models"
+        resp = requests.get(models_url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        for m in data:
+            # Match by model id, or just take the first if only one
+            ctx = m.get("context_length") or m.get("max_model_len")
+            if ctx:
+                return int(ctx)
+    except Exception:
+        pass
+    return None
+
+
 async def start_handler(request):
     global game_manager
     data = await request.json()
@@ -566,6 +591,13 @@ async def start_handler(request):
         await game_manager.stop()
 
     config = AgentConfig(llm_url=llm_url, model=model)
+
+    # Try to detect context window from server
+    ctx = await asyncio.to_thread(_query_context_window, llm_url, model)
+    if ctx:
+        config.context_window = ctx
+        print(f"[Server] Detected context window: {ctx}", file=sys.stderr, flush=True)
+
     game_manager = GameManager(str(GAMES_DIR / game_file), config)
     await game_manager.start()
     return web.json_response({"status": "started", "game": game_file})
@@ -659,11 +691,33 @@ async def websocket_handler(request):
     return ws
 
 
+async def restart_gemma_handler(request):
+    """Run stop-gemma then start-gemma-text on the server."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-ic", "stop-gemma; start-gemma-text",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        return web.json_response({
+            "status": "ok" if proc.returncode == 0 else "error",
+            "returncode": proc.returncode,
+            "stdout": stdout.decode(errors="replace"),
+            "stderr": stderr.decode(errors="replace"),
+        })
+    except asyncio.TimeoutError:
+        return web.json_response({"status": "error", "message": "Timed out"}, status=504)
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
 def create_app():
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/games", games_handler)
     app.router.add_post("/start", start_handler)
+    app.router.add_post("/restart-gemma", restart_gemma_handler)
     app.router.add_get("/ws", websocket_handler)
     return app
 
