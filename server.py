@@ -199,10 +199,10 @@ class GameManager:
 
         # Fresh engine — deterministic because dfrotz uses -s 0
         self.engine = FrotzEngine(self.story_file)
-        opening_raw = await asyncio.to_thread(self.engine.read_output, 5.0)
-
-        for cmd in commands_to_replay:
-            await asyncio.to_thread(self.engine.send_command, cmd)
+        await asyncio.to_thread(self.engine.read_output, 5.0)
+        # Blast all replay commands at once (like piping to frotz stdin)
+        if commands_to_replay:
+            await asyncio.to_thread(self.engine.replay_commands, commands_to_replay)
 
         # Restore context
         if 0 < target_turn <= len(self.turn_data):

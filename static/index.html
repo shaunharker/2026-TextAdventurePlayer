@@ -541,9 +541,7 @@ function handleRollback(ev) {
     cont.querySelectorAll('.turn-card').forEach(card => {
         if (parseInt(card.dataset.turn) > ev.to_turn) card.remove();
     });
-    // Also remove any trailing notices
     currentTurn = ev.to_turn;
-    addNotice('system-notice', 'Rolled back to turn ' + ev.to_turn);
 }
 
 function handleHintInjected(ev) {

@@ -388,13 +388,13 @@ class FrotzEngine:
     def read_output(self, timeout: float = 5.0) -> str:
         buffer = bytearray()
         deadline = time.monotonic() + timeout
-        
+
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-                
-            ready, _, _ = select.select([self.master_fd], [],[], min(remaining, 0.1))
+
+            ready, _, _ = select.select([self.master_fd], [], [], min(remaining, 0.1))
             if ready:
                 try:
                     chunk = os.read(self.master_fd, 4096)
@@ -402,18 +402,49 @@ class FrotzEngine:
                     break
                 if not chunk:
                     break
-                    
+
                 buffer.extend(chunk)
                 text_so_far = buffer.decode("utf-8", errors="replace")
-                
+
                 if re.search(r"\*\*\*[ \t]*MORE[ \t]*\*\*\*", text_so_far, re.IGNORECASE):
                     os.write(self.master_fd, b"\n")
                     continue
-                
-                if len(text_so_far) > 50 and re.search(r"\n>[ \t]*$", text_so_far):
+            elif buffer:
+                # No data ready and we have output — frotz has paused writing.
+                # Check for the input prompt now (safe from intermediate matches).
+                text_so_far = buffer.decode("utf-8", errors="replace")
+                if re.search(r"\n>[ \t]*$", text_so_far):
                     break
 
         return buffer.decode("utf-8", errors="replace")
+
+    def replay_commands(self, commands: list, timeout: float = 10.0):
+        """Blast all commands at once and drain output — instant replay."""
+        if not commands:
+            return
+        blob = "\n".join(commands) + "\n"
+        os.write(self.master_fd, blob.encode("utf-8"))
+        # Drain output until frotz is idle (no data ready + prompt visible)
+        buf = bytearray()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([self.master_fd], [], [], min(remaining, 0.05))
+            if ready:
+                try:
+                    chunk = os.read(self.master_fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf.extend(chunk)
+            elif buf:
+                # No more data flowing — check for the final prompt
+                text = buf.decode("utf-8", errors="replace")
+                if re.search(r"\n>[ \t]*$", text):
+                    break
 
     def send_command(self, command: str) -> str:
         os.write(self.master_fd, (command + "\n").encode("utf-8"))
@@ -592,10 +623,15 @@ class Agent:
                     command = result["command"].strip()
                     self.context.add_assistant(reasoning, command)
                     return reasoning, command
-                    
-                self.renderer.system_message(f"Attempt {attempt}: Invalid JSON format. Retrying...")
+
+                preview = raw_response[:200].replace('\n', '\\n')
+                msg = f"Attempt {attempt}/{self.config.llm_retries}: Invalid JSON. Preview: {preview}"
+                print(f"[Agent] {msg}", file=sys.stderr, flush=True)
+                self.renderer.system_message(msg)
             except requests.RequestException as e:
-                self.renderer.error(f"Attempt {attempt}: Network error: {e}")
+                msg = f"Attempt {attempt}/{self.config.llm_retries}: Network error: {e}"
+                print(f"[Agent] {msg}", file=sys.stderr, flush=True)
+                self.renderer.error(msg)
                 time.sleep(2)
                 
         raise RuntimeError("Agent exhausted all retries attempting to generate a valid action.")
