@@ -76,9 +76,7 @@
             outline: none;
         }
         .form-group select:focus,
-        .form-group input:focus {
-            border-color: var(--accent);
-        }
+        .form-group input:focus { border-color: var(--accent); }
         .btn {
             display: inline-flex;
             align-items: center;
@@ -145,17 +143,9 @@
             flex-wrap: wrap;
         }
         #stats-bar strong { color: var(--text-main); }
-        .stat-sep {
-            width: 1px;
-            background: var(--border-color);
-            align-self: stretch;
-        }
+        .stat-sep { width: 1px; background: var(--border-color); align-self: stretch; }
 
-        #turns {
-            flex: 1;
-            overflow-y: auto;
-            padding: 24px;
-        }
+        #turns { flex: 1; overflow-y: auto; padding: 24px; }
 
         /* ---- Turn Cards ---- */
         .turn-card {
@@ -184,12 +174,7 @@
             letter-spacing: 0.05em;
             color: var(--text-muted);
         }
-        .turn-number {
-            font-size: 2rem;
-            font-weight: 700;
-            color: #e2e8f0;
-            line-height: 1;
-        }
+        .turn-number { font-size: 2rem; font-weight: 700; color: #e2e8f0; line-height: 1; }
         .rollback-btn {
             display: none;
             margin-top: 8px;
@@ -205,11 +190,7 @@
         .rollback-btn:hover { background: rgba(251,191,36,0.15); }
         body.paused .rollback-btn { display: block; }
 
-        .turn-content {
-            flex: 1;
-            padding: 20px 24px;
-            min-width: 0;
-        }
+        .turn-content { flex: 1; padding: 20px 24px; min-width: 0; }
         .reasoning {
             color: var(--text-reasoning);
             font-style: italic;
@@ -241,6 +222,17 @@
             line-height: 1.5;
         }
 
+        /* ---- Streaming text (live LLM output) ---- */
+        .streaming-text {
+            color: var(--text-reasoning);
+            font-style: italic;
+            font-size: 1rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            opacity: 0.8;
+        }
+
         /* ---- Notices ---- */
         .hint-notice {
             padding: 10px 16px;
@@ -268,7 +260,7 @@
             font-size: 0.9rem;
         }
 
-        /* ---- Spinner (shown in turn card while LLM is thinking) ---- */
+        /* ---- Spinner ---- */
         .spinner {
             display: inline-block;
             width: 20px; height: 20px;
@@ -310,14 +302,41 @@
         }
         #hint-input:focus { border-color: var(--accent); }
         #hint-bar label {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            cursor: pointer;
-            white-space: nowrap;
+            display: flex; align-items: center; gap: 4px;
+            font-size: 0.85rem; color: var(--text-muted);
+            cursor: pointer; white-space: nowrap;
         }
+
+        /* ---- Modal ---- */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 32px 36px;
+            max-width: 420px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+        }
+        .modal-card p {
+            margin-bottom: 28px;
+            font-size: 1.05rem;
+            color: var(--text-response);
+            line-height: 1.5;
+        }
+        .modal-buttons { display: flex; gap: 12px; justify-content: center; }
+        .modal-buttons .btn { min-width: 100px; }
 
         /* ---- Scrollbar ---- */
         #turns::-webkit-scrollbar { width: 8px; }
@@ -373,6 +392,17 @@
     </div>
 </div>
 
+<!-- ============ Modal ============ -->
+<div id="modal-overlay" class="modal-overlay">
+    <div class="modal-card">
+        <p id="modal-message"></p>
+        <div class="modal-buttons">
+            <button class="btn" id="modal-cancel-btn">Cancel</button>
+            <button class="btn btn-danger" id="modal-confirm-btn">Confirm</button>
+        </div>
+    </div>
+</div>
+
 <script>
 // ===========================================================================
 // State
@@ -380,6 +410,7 @@
 let ws = null;
 let isPaused = false;
 let currentTurn = 0;
+let streamAccumulated = '';
 
 // ===========================================================================
 // Init: populate game list
@@ -391,6 +422,31 @@ fetch('/games').then(r => r.json()).then(games => {
         opt.value = g; opt.textContent = g;
         sel.appendChild(opt);
     });
+});
+
+// ===========================================================================
+// Modal
+// ===========================================================================
+let modalResolve = null;
+
+function showModal(message, confirmText) {
+    return new Promise(resolve => {
+        modalResolve = resolve;
+        document.getElementById('modal-message').textContent = message;
+        document.getElementById('modal-confirm-btn').textContent = confirmText || 'Confirm';
+        document.getElementById('modal-overlay').classList.add('active');
+    });
+}
+
+function hideModal(result) {
+    document.getElementById('modal-overlay').classList.remove('active');
+    if (modalResolve) { const r = modalResolve; modalResolve = null; r(result); }
+}
+
+document.getElementById('modal-confirm-btn').onclick = () => hideModal(true);
+document.getElementById('modal-cancel-btn').onclick = () => hideModal(false);
+document.getElementById('modal-overlay').addEventListener('keydown', e => {
+    if (e.key === 'Escape') hideModal(false);
 });
 
 // ===========================================================================
@@ -416,8 +472,8 @@ function startGame() {
     });
 }
 
-function stopGame() {
-    if (!confirm('Stop the game?')) return;
+async function stopGame() {
+    if (!await showModal('Stop the current game?', 'Stop Game')) return;
     if (ws) ws.send(JSON.stringify({type: 'stop'}));
     document.getElementById('game-panel').style.display = 'none';
     document.getElementById('config-panel').style.display = 'flex';
@@ -437,18 +493,21 @@ function connectWS() {
 
 function handleEvent(ev) {
     switch (ev.type) {
-        case 'full_state':    handleFullState(ev); break;
-        case 'game_output':   handleGameOutput(ev); break;
-        case 'turn_start':    handleTurnStart(ev); break;
-        case 'ai_action':     handleAiAction(ev); break;
-        case 'stats':         handleStats(ev); break;
-        case 'rollback':      handleRollback(ev); break;
-        case 'hint_injected': handleHintInjected(ev); break;
-        case 'paused':        setPaused(true); break;
-        case 'resumed':       setPaused(false); break;
-        case 'system_message': addNotice('system-notice', ev.message); break;
-        case 'error':         addNotice('error-notice', ev.message); break;
-        case 'session_end':   addNotice('system-notice', 'Session ended.'); break;
+        case 'full_state':      handleFullState(ev); break;
+        case 'game_output':     handleGameOutput(ev); break;
+        case 'turn_start':      handleTurnStart(ev); break;
+        case 'streaming_text':  handleStreamingText(ev); break;
+        case 'ai_action':       handleAiAction(ev); break;
+        case 'stats':           handleStats(ev); break;
+        case 'rollback':        handleRollback(ev); break;
+        case 'turn_cancelled':  handleTurnCancelled(ev); break;
+        case 'turn_retry':      handleTurnRetry(ev); break;
+        case 'hint_injected':   handleHintInjected(ev); break;
+        case 'paused':          setPaused(true); break;
+        case 'resumed':         setPaused(false); break;
+        case 'system_message':  addNotice('system-notice', ev.message); break;
+        case 'error':           addNotice('error-notice', ev.message); break;
+        case 'session_end':     addNotice('system-notice', 'Session ended.'); break;
     }
 }
 
@@ -474,11 +533,9 @@ function handleFullState(ev) {
 function handleGameOutput(ev) {
     const turn = ev.turn ?? 0;
     if (turn === 0) {
-        // Opening text — create turn-0 card
         const cont = document.getElementById('turns');
         cont.appendChild(buildTurnCard(0, null, null, ev.text));
     } else {
-        // Append response to existing card and remove spinner
         const card = document.getElementById('turn-' + turn);
         if (card) {
             const tc = card.querySelector('.turn-content');
@@ -494,8 +551,8 @@ function handleGameOutput(ev) {
 
 function handleTurnStart(ev) {
     currentTurn = ev.turn;
+    streamAccumulated = '';
     const card = makeTurnCardSkeleton(ev.turn);
-    // Add thinking spinner
     const tc = card.querySelector('.turn-content');
     const sp = document.createElement('div');
     sp.className = 'thinking-label';
@@ -505,12 +562,70 @@ function handleTurnStart(ev) {
     autoScroll();
 }
 
-function handleAiAction(ev) {
+function handleStreamingText(ev) {
+    streamAccumulated += ev.text;
+    const display = extractStreamingReasoning(streamAccumulated);
+
     const turn = ev.turn ?? currentTurn;
     const card = document.getElementById('turn-' + turn);
     if (!card) return;
     const tc = card.querySelector('.turn-content');
     removeSpinner(tc);
+
+    let streamDiv = tc.querySelector('.streaming-text');
+    if (!streamDiv) {
+        streamDiv = document.createElement('div');
+        streamDiv.className = 'streaming-text';
+        tc.appendChild(streamDiv);
+    }
+    streamDiv.textContent = display;
+    autoScroll();
+}
+
+function extractStreamingReasoning(raw) {
+    // Strip complete <think>...</think> blocks
+    let text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    // Strip an incomplete <think> still being streamed
+    text = text.replace(/<think>[\s\S]*$/, '');
+    text = text.trim();
+
+    // Find the reasoning value start: {"reasoning": "
+    const match = text.match(/\{\s*"reasoning"\s*:\s*"/);
+    if (!match) return '';
+    const start = match.index + match[0].length;
+    let content = text.substring(start);
+
+    // Find the end of the reasoning value (unescaped quote before "command")
+    const endMatch = content.match(/(?<!\\)"\s*,\s*"command"/);
+    if (endMatch) {
+        content = content.substring(0, endMatch.index);
+    }
+
+    // Decode JSON string escapes by parsing as a JSON string
+    // Trim trailing incomplete escape sequence if present
+    for (let trim = 0; trim <= 2; trim++) {
+        try {
+            return JSON.parse('"' + content.slice(0, content.length - trim || undefined) + '"');
+        } catch { /* try trimming more */ }
+    }
+    // Fallback: manual decode of common escapes
+    return content
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\')
+        .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+function handleAiAction(ev) {
+    const turn = ev.turn ?? currentTurn;
+    const card = document.getElementById('turn-' + turn);
+    if (!card) return;
+    const tc = card.querySelector('.turn-content');
+    // Clear streaming text and spinner
+    removeSpinner(tc);
+    const st = tc.querySelector('.streaming-text');
+    if (st) st.remove();
 
     const rDiv = document.createElement('div');
     rDiv.className = 'reasoning';
@@ -544,11 +659,28 @@ function handleRollback(ev) {
     currentTurn = ev.to_turn;
 }
 
+function handleTurnCancelled(ev) {
+    streamAccumulated = '';
+    const card = document.getElementById('turn-' + ev.turn);
+    if (card) card.remove();
+}
+
+function handleTurnRetry(ev) {
+    streamAccumulated = '';
+    const turn = ev.turn ?? currentTurn;
+    const card = document.getElementById('turn-' + turn);
+    if (!card) return;
+    const tc = card.querySelector('.turn-content');
+    tc.innerHTML = '';
+    const sp = document.createElement('div');
+    sp.className = 'thinking-label';
+    sp.innerHTML = '<div class="spinner"></div> ' + escapeHtml(ev.message || 'Retrying...');
+    tc.appendChild(sp);
+    autoScroll();
+}
+
 function handleHintInjected(ev) {
-    const text = ev.original === ev.translated
-        ? ev.translated
-        : ev.translated + '  (original: ' + ev.original + ')';
-    addNotice('hint-notice', 'Hint injected: ' + text);
+    addNotice('hint-notice', ev.text);
 }
 
 // ===========================================================================
@@ -637,12 +769,14 @@ function togglePause() {
 function setPaused(paused) {
     isPaused = paused;
     document.body.classList.toggle('paused', paused);
-    const btn = document.getElementById('pause-btn');
-    btn.textContent = paused ? 'Resume' : 'Pause';
+    document.getElementById('pause-btn').textContent = paused ? 'Resume' : 'Pause';
 }
 
-function rollbackTo(turn) {
-    if (!confirm('Roll back to turn ' + turn + '? All later turns will be removed.')) return;
+async function rollbackTo(turn) {
+    if (!await showModal(
+        'Roll back to turn ' + turn + '? All later turns will be removed.',
+        'Roll Back'
+    )) return;
     if (ws) ws.send(JSON.stringify({type: 'rollback', to_turn: turn}));
 }
 

@@ -2,12 +2,14 @@
 """
 Web-based AI text adventure player.
 Serves a browser UI for watching an AI play interactive fiction,
-with live updates via WebSocket, hint injection, and rollback support.
+with live streaming, hint injection, and rollback support.
 """
 
 import asyncio
 import copy
 import json
+import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,8 +19,8 @@ import requests
 from aiohttp import web
 
 from main import (
-    AgentConfig, FrotzEngine, ContextManager, Agent,
-    TiktokenTokenizer, clean_game_output,
+    AgentConfig, FrotzEngine, ContextManager,
+    TiktokenTokenizer, clean_game_output, extract_json_robust,
 )
 
 # ===========================================================================
@@ -39,15 +41,25 @@ GAMES_DIR = Path(__file__).parent / "games"
 
 
 # ===========================================================================
-# Instrumented LLM Client  (captures usage / timing per call)
+# Exceptions
+# ===========================================================================
+
+class LLMCancelled(Exception):
+    pass
+
+
+# ===========================================================================
+# Instrumented LLM Client  (non-streaming + streaming with cancellation)
 # ===========================================================================
 
 class InstrumentedLLMClient:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.last_stats: Dict = {}
+        self._streaming_response = None
 
     def chat_completion(self, messages, max_tokens, temperature) -> str:
+        """Non-streaming call (used by compaction and hint translation)."""
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -77,6 +89,91 @@ class InstrumentedLLMClient:
         }
         return data["choices"][0]["message"]["content"]
 
+    def chat_completion_streaming(self, messages, max_tokens, temperature,
+                                  cancel_event, chunk_callback) -> str:
+        """Streaming call. Calls chunk_callback(text) per token. Cancellable."""
+        payload = {
+            "model": self.config.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        start = time.monotonic()
+        self._streaming_response = requests.post(
+            self.config.llm_url, json=payload,
+            timeout=self.config.timeout, stream=True,
+        )
+        self._streaming_response.raise_for_status()
+
+        accumulated = ""
+        usage = {}
+
+        try:
+            for raw_line in self._streaming_response.iter_lines():
+                if cancel_event.is_set():
+                    raise LLMCancelled()
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace")
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = chunk.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        accumulated += content
+                        chunk_callback(content)
+
+                if "usage" in chunk:
+                    usage = chunk["usage"]
+        except LLMCancelled:
+            raise
+        except Exception:
+            if cancel_event.is_set():
+                raise LLMCancelled()
+            raise
+        finally:
+            try:
+                self._streaming_response.close()
+            except Exception:
+                pass
+            self._streaming_response = None
+
+        elapsed_ms = (time.monotonic() - start) * 1000
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        details = usage.get("prompt_tokens_details") or {}
+        cached = details.get("cached_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+
+        self.last_stats = {
+            "llm_time_ms": round(elapsed_ms),
+            "prompt_tokens": prompt_tokens,
+            "cached_tokens": cached,
+            "uncached_tokens": prompt_tokens - cached,
+            "output_tokens": output_tokens,
+        }
+        return accumulated
+
+    def cancel_streaming(self):
+        """Force-close an in-flight streaming request."""
+        resp = self._streaming_response
+        if resp:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
 
 # ===========================================================================
 # WebSocket Renderer  (satisfies the OutputRenderer protocol)
@@ -89,7 +186,7 @@ class WebSocketRenderer:
         self.clients: set = set()
         self._pending: List[dict] = []
 
-    # --- sync (called by Agent / ContextManager in worker thread) ----------
+    # --- sync (called by ContextManager in worker thread) ------------------
     def session_start(self): pass
     def game_output(self, text: str): pass
     def turn_start(self, turn: int): pass
@@ -133,7 +230,7 @@ class TurnRecord:
 
 
 # ===========================================================================
-# Game Manager  (owns engine + agent + game loop)
+# Game Manager
 # ===========================================================================
 
 class GameManager:
@@ -145,7 +242,6 @@ class GameManager:
         self.tokenizer = TiktokenTokenizer()
         self.engine: Optional[FrotzEngine] = None
         self.context: Optional[ContextManager] = None
-        self.agent: Optional[Agent] = None
 
         self.turn_data: List[TurnRecord] = []
         self.command_history: List[str] = []
@@ -156,6 +252,7 @@ class GameManager:
         self.stopped: bool = False
         self.rollback_target: Optional[int] = None
         self.hint_queue: asyncio.Queue = asyncio.Queue()
+        self._cancel_event: Optional[threading.Event] = None
 
         self.total_uncached: int = 0
         self.total_output: int = 0
@@ -168,7 +265,6 @@ class GameManager:
         self.context = ContextManager(
             self.config, self.llm, self.tokenizer, self.renderer
         )
-        self.agent = Agent(self.config, self.llm, self.context, self.renderer)
 
     async def start(self):
         self._init_engine()
@@ -177,6 +273,7 @@ class GameManager:
     async def stop(self):
         self.stopped = True
         self.paused = False
+        self._do_cancel()
         if self._task:
             self._task.cancel()
             try:
@@ -190,6 +287,11 @@ class GameManager:
                 pass
             self.engine = None
 
+    def _do_cancel(self):
+        if self._cancel_event:
+            self._cancel_event.set()
+        self.llm.cancel_streaming()
+
     # ------------------------------------------------------------------
     async def do_rollback(self, target_turn: int):
         if self.engine:
@@ -197,14 +299,11 @@ class GameManager:
 
         commands_to_replay = self.command_history[:target_turn]
 
-        # Fresh engine — deterministic because dfrotz uses -s 0
         self.engine = FrotzEngine(self.story_file)
         await asyncio.to_thread(self.engine.read_output, 5.0)
-        # Blast all replay commands at once (like piping to frotz stdin)
         if commands_to_replay:
             await asyncio.to_thread(self.engine.replay_commands, commands_to_replay)
 
-        # Restore context
         if 0 < target_turn <= len(self.turn_data):
             self.context.messages = copy.deepcopy(
                 self.turn_data[target_turn - 1].context_snapshot
@@ -219,8 +318,45 @@ class GameManager:
         self.command_history = commands_to_replay
         self.turn_data = self.turn_data[:target_turn]
         self.current_turn = target_turn
-        self.agent = Agent(self.config, self.llm, self.context, self.renderer)
         await self.renderer.send_event({"type": "rollback", "to_turn": target_turn})
+
+    # ------------------------------------------------------------------
+    async def _stream_llm_turn(self, turn: int) -> str:
+        """Run one streaming LLM call, broadcasting chunks. Returns full text.
+        Raises LLMCancelled if pause/cancel was requested."""
+        cancel = threading.Event()
+        self._cancel_event = cancel
+        loop = asyncio.get_event_loop()
+        chunk_queue = asyncio.Queue()
+
+        def on_chunk(text):
+            loop.call_soon_threadsafe(chunk_queue.put_nowait, text)
+
+        future = loop.run_in_executor(
+            None, self.llm.chat_completion_streaming,
+            self.context.messages, self.config.max_response_tokens,
+            self.config.temperature, cancel, on_chunk,
+        )
+
+        # Broadcast chunks as they arrive
+        while not future.done():
+            try:
+                text = await asyncio.wait_for(chunk_queue.get(), timeout=0.05)
+                await self.renderer.send_event(
+                    {"type": "streaming_text", "text": text, "turn": turn}
+                )
+            except asyncio.TimeoutError:
+                continue
+
+        # Drain remaining
+        while not chunk_queue.empty():
+            text = chunk_queue.get_nowait()
+            await self.renderer.send_event(
+                {"type": "streaming_text", "text": text, "turn": turn}
+            )
+
+        self._cancel_event = None
+        return future.result()
 
     # ------------------------------------------------------------------
     async def _run_loop(self):
@@ -250,7 +386,6 @@ class GameManager:
                 while not self.hint_queue.empty():
                     hint_data = self.hint_queue.get_nowait()
                     hint_text = hint_data["text"]
-                    original = hint_text
                     if hint_data.get("translate"):
                         try:
                             hint_text = await asyncio.to_thread(
@@ -258,11 +393,11 @@ class GameManager:
                             )
                         except Exception:
                             pass
-                    self.context.add_user(f"{HINT_PREFIX}: {hint_text}")
+                    injected = f"{HINT_PREFIX}: {hint_text}"
+                    self.context.add_user(injected)
                     await self.renderer.send_event({
                         "type": "hint_injected",
-                        "original": original,
-                        "translated": hint_text,
+                        "text": injected,
                     })
 
                 # ---- new turn ----
@@ -270,64 +405,11 @@ class GameManager:
                 turn = self.current_turn
                 await self.renderer.send_event({"type": "turn_start", "turn": turn})
 
-                # LLM action (blocking → thread)
-                try:
-                    reasoning, command = await asyncio.to_thread(
-                        self.agent.get_next_action
-                    )
-                except RuntimeError as e:
-                    await self.renderer.send_event(
-                        {"type": "error", "message": str(e)}
-                    )
-                    break
+                # ---- streaming LLM with retry ----
+                turn_completed = await self._do_turn(turn)
+                if not turn_completed:
+                    continue  # back to pause/rollback check
 
-                # Flush system_message / error events emitted by Agent
-                await self.renderer.flush()
-
-                # Rollback requested while LLM was thinking?
-                if self.rollback_target is not None:
-                    target = self.rollback_target
-                    self.rollback_target = None
-                    self.paused = True
-                    await self.renderer.send_event({"type": "paused"})
-                    await self.do_rollback(target)
-                    continue
-
-                # Stats
-                stats = dict(self.llm.last_stats)
-                self.total_uncached += stats.get("uncached_tokens", 0)
-                self.total_output += stats.get("output_tokens", 0)
-                self.total_llm_time += stats.get("llm_time_ms", 0)
-                stats["total_uncached"] = self.total_uncached
-                stats["total_output"] = self.total_output
-                stats["total_llm_time"] = self.total_llm_time
-
-                await self.renderer.send_event({
-                    "type": "ai_action",
-                    "reasoning": reasoning,
-                    "command": command,
-                    "turn": turn,
-                })
-                await self.renderer.send_event({"type": "stats", **stats})
-
-                # Frotz
-                output_raw = await asyncio.to_thread(
-                    self.engine.send_command, command
-                )
-                output_text = clean_game_output(output_raw)
-                await self.renderer.send_event(
-                    {"type": "game_output", "text": output_text, "turn": turn}
-                )
-
-                self.context.add_user(f"Game response:\n\n{output_text}")
-                self.command_history.append(command)
-                self.turn_data.append(TurnRecord(
-                    turn_number=turn,
-                    command=command,
-                    reasoning=reasoning,
-                    game_output=output_text,
-                    context_snapshot=copy.deepcopy(self.context.messages),
-                ))
                 await asyncio.sleep(0.5)
 
         except asyncio.CancelledError:
@@ -347,6 +429,99 @@ class GameManager:
                     pass
                 self.engine = None
             await self.renderer.send_event({"type": "session_end"})
+
+    # ------------------------------------------------------------------
+    async def _do_turn(self, turn: int) -> bool:
+        """Execute one turn with streaming + retries. Returns True if completed."""
+        for attempt in range(1, self.config.llm_retries + 1):
+            # Compaction (may call non-streaming LLM for summary)
+            await asyncio.to_thread(self.context.compact_if_needed)
+            await self.renderer.flush()
+
+            # Streaming LLM call
+            try:
+                full_text = await self._stream_llm_turn(turn)
+            except LLMCancelled:
+                await self.renderer.send_event(
+                    {"type": "turn_cancelled", "turn": turn}
+                )
+                self.current_turn -= 1
+                return False
+            except requests.RequestException as e:
+                msg = f"Attempt {attempt}/{self.config.llm_retries}: Network error: {e}"
+                print(f"[Agent] {msg}", file=sys.stderr, flush=True)
+                await self.renderer.send_event(
+                    {"type": "turn_retry", "turn": turn, "message": msg}
+                )
+                await asyncio.sleep(2)
+                continue
+
+            # JSON extraction
+            result = extract_json_robust(full_text)
+            if result and "command" in result:
+                reasoning = result.get("reasoning", "No reasoning provided.")
+                command = result["command"].strip()
+                self.context.add_assistant(reasoning, command)
+
+                # Stats
+                stats = dict(self.llm.last_stats)
+                self.total_uncached += stats.get("uncached_tokens", 0)
+                self.total_output += stats.get("output_tokens", 0)
+                self.total_llm_time += stats.get("llm_time_ms", 0)
+                stats["total_uncached"] = self.total_uncached
+                stats["total_output"] = self.total_output
+                stats["total_llm_time"] = self.total_llm_time
+
+                await self.renderer.send_event({
+                    "type": "ai_action",
+                    "reasoning": reasoning,
+                    "command": command,
+                    "turn": turn,
+                })
+                await self.renderer.send_event({"type": "stats", **stats})
+
+                # Check rollback before frotz
+                if self.rollback_target is not None:
+                    target = self.rollback_target
+                    self.rollback_target = None
+                    self.paused = True
+                    await self.renderer.send_event({"type": "paused"})
+                    await self.do_rollback(target)
+                    return False
+
+                # Frotz
+                output_raw = await asyncio.to_thread(
+                    self.engine.send_command, command
+                )
+                output_text = clean_game_output(output_raw)
+                await self.renderer.send_event(
+                    {"type": "game_output", "text": output_text, "turn": turn}
+                )
+
+                self.context.add_user(f"Game response:\n\n{output_text}")
+                self.command_history.append(command)
+                self.turn_data.append(TurnRecord(
+                    turn_number=turn,
+                    command=command,
+                    reasoning=reasoning,
+                    game_output=output_text,
+                    context_snapshot=copy.deepcopy(self.context.messages),
+                ))
+                return True
+            else:
+                preview = full_text[:200].replace('\n', '\\n')
+                msg = f"Attempt {attempt}/{self.config.llm_retries}: Invalid JSON. Preview: {preview}"
+                print(f"[Agent] {msg}", file=sys.stderr, flush=True)
+                await self.renderer.send_event(
+                    {"type": "turn_retry", "turn": turn, "message": msg}
+                )
+
+        # Exhausted retries
+        await self.renderer.send_event(
+            {"type": "error", "message": "Agent exhausted all retries."}
+        )
+        self.stopped = True
+        return False
 
     # ------------------------------------------------------------------
     def _translate_hint_sync(self, hint_text: str) -> str:
@@ -400,7 +575,6 @@ async def websocket_handler(request):
 
     if game_manager:
         game_manager.renderer.clients.add(ws)
-        # Catch-up: send full state
         state = {
             "type": "full_state",
             "opening_text": game_manager.opening_text,
@@ -442,6 +616,7 @@ async def websocket_handler(request):
 
             elif t == "pause":
                 game_manager.paused = True
+                game_manager._do_cancel()
                 await game_manager.renderer.send_event({"type": "paused"})
 
             elif t == "resume":
@@ -452,6 +627,7 @@ async def websocket_handler(request):
                 target = data.get("to_turn", 0)
                 if not game_manager.paused:
                     game_manager.paused = True
+                    game_manager._do_cancel()
                     await game_manager.renderer.send_event({"type": "paused"})
                 game_manager.rollback_target = target
 
